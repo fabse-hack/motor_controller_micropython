@@ -17,6 +17,7 @@
 - AS5600 rotary encoder
 - ESP32 S2 mini
 - Breadboard + some cables
+- 9 V / 12 V power supply for the DC Motor
 
 # How it works
 
@@ -32,5 +33,5 @@
 UNDER CONSTRUCTION
 
 # TODO
-finish coding
+finish coding  
 present some results
