@@ -2,7 +2,7 @@
 
 [Hardware](#hardware)  
 [How it works](#how_it_works)  
-[CAD Mounts](#CAD_mounts)  
+[3D printing parts - CAD files](#3D_printing_parts_CAD_files)  
 [TODO](#todo)
 
 ![image1](dc_motor_micropython.jpg)
@@ -26,9 +26,11 @@
 - Motor controller class
 - initial min_duty at the beginning of the program
 - set the motor to for example: 50 rpm or 5 rounds then stop
+  
 - Motor turn: left / right / stop with speed 100 / -100 / 0
+- RPM messurement over angle measurement to different times
 
-# CAD Mounts
+# 3D printing parts - CAD files
 
 UNDER CONSTRUCTION
 

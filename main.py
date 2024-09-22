@@ -26,13 +26,13 @@ class DCMotor:
 
     def set_speed(self, speed: int):
         if speed > 0:
-            # Rechtslauf
+            # right turn
             self.speed = self.duty_cycle(speed)
             self.pin1.duty(0)
             self.pin2.duty(self.speed)
             print(f"Motor Rechtslauf: Pin1=0, Pin2={self.speed}")
         elif speed < 0:
-            # Linkslauf
+            # left turn
             self.speed = self.duty_cycle(-speed)
             self.pin1.duty(self.speed)
             self.pin2.duty(0)
