@@ -1,5 +1,9 @@
 from machine import I2C, Pin, PWM
 import time
+import sys
+import neopixel
+import itertools
+
 
 # AS5600 Register Konstanten
 AS5600_I2C_ADDR = 0x36
@@ -134,16 +138,23 @@ class AS5600:
 
         print(f"Delta Winkel: {delta_angle:.2f}°, Delta Zeit: {delta_time:.4f}s, RPM: {self.rpm:.2f}")
 
+
     def get_rpm(self):
         return self.rpm
 
 
 class MotorController:
-    def __init__(self, motor, sensor, kp=1.0):
+    def __init__(self, motor, sensor):
         self.motor = motor
         self.sensor = sensor
         self.kp = kp
+        self.ki = ki
+        self.kd = kd
         self.target_rpm = 0
+
+        # PID-Parameter
+        self.previous_error = 0
+        self.integral = 0
 
     def set_target_rpm(self, rpm):
         self.target_rpm = rpm
@@ -152,29 +163,78 @@ class MotorController:
     def update(self):
         current_rpm = self.sensor.get_rpm()
         error = self.target_rpm - current_rpm
-        adjustment = int(self.kp * error)
+        self.integral += error
+        derivative = error - self.previous_error
+
+        adjustment = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
         print(f"Error: {error}, Anpassung: {adjustment}")
 
         adjustment = max(-100, min(100, adjustment))
         print(f"Anpassung nach Begrenzung: {adjustment}")
 
-        new_speed = self.motor.speed + adjustment
+        new_speed = self.motor.speed + int(adjustment)
         new_speed = max(0, min(1023, new_speed))
         print(f"new PWM-Speed: {new_speed}")
 
         self.motor.set_speed(new_speed if new_speed > 0 else 0)
 
-    def control_motor_with_rpm(self, target_rpm, duration=10):
-        self.set_target_rpm(target_rpm)
-        start_time = time.time()
+        # Debug-Ausgaben
+        print(f"PID-Regler: Fehler={error:.2f}, Integral={self.integral:.2f}, Derivative={derivative:.2f}, Anpassung={adjustment:.2f}")
+        print(f"Neuer PWM-Speed: {new_speed}")
+        self.previous_error = error
 
-        while time.time() - start_time < duration:
-            self.sensor.update_rpm()
-            self.update()
-            print(f"target-RPM: {self.target_rpm}, actually RPM: {self.sensor.get_rpm()}, PWM-Speed: {self.motor.speed}")
-            time.sleep(0.1)
-        self.motor.stop()
-        print("Motor stopped.")
+    def control_motor_with_rpm(self, target_rpm, duration=10):
+        if self.kd is not None or self.ki is not None or self.kp is not None:
+            self.set_target_rpm(target_rpm)
+            start_time = time.time()
+
+            while time.time() - start_time < duration:
+                self.sensor.update_rpm()
+                self.update()
+                print(f"target-RPM: {self.target_rpm}, actually RPM: {self.sensor.get_rpm()}, PWM-Speed: {self.motor.speed}")
+                sys.stdout.write(f"RPM: {self.sensor.get_rpm()}, PWM-Speed: {self.motor.speed}\n")
+                sys.stdout.flush()
+                time.sleep(0.1)
+            self.motor.stop()
+            print("Motor stopped.")
+        else:
+            print("run tune_pid first!")
+
+    def tune_pid(self, target_rpm, duration=10):
+        kp_values = [0.5, 1.0, 1.5, 2.0]
+        ki_values = [0.0, 0.1, 0.2, 0.5]
+        kd_values = [0.0, 0.1, 0.2, 0.5]
+
+        best_params = None
+        best_performance = float('inf')
+
+        for kp, ki, kd in product(kp_values, ki_values, kd_values):
+            self.kp = kp
+            self.ki = ki
+            self.kd = kd
+            print(f"Testing with kp={kp}, ki={ki}, kd={kd}")
+
+            self.control_motor_with_rpm(target_rpm, duration)
+
+            performance = sum((self.target_rpm - self.sensor.get_rpm())**2 for _ in range(duration * 10))
+            print(f"Performance: {performance}")
+
+            if performance < best_performance:
+                best_performance = performance
+                best_params = (kp, ki, kd)
+                print(f"New best params: kp={kp}, ki={ki}, kd={kd} with performance={performance}")
+
+        self.kp, self.ki, self.kd = best_params
+        print(f"Best PID parameters: kp={self.kp}, ki={self.ki}, kd={self.kd}")
+
+
+def product(*args):
+    if not args:
+        yield ()
+        return
+    for item in args[0]:
+        for rest in product(*args[1:]):
+            yield (item,) + rest
 
 
 def calibrate_min_duty(motor, sensor):
@@ -195,9 +255,14 @@ def calibrate_min_duty(motor, sensor):
 
 
 if __name__ == "__main__":
+
     sda = Pin(5)
     scl = Pin(3)
     i2c = I2C(0, sda=sda, scl=scl, freq=400000)
+
+    led = neopixel.NeoPixel(Pin(36), 1)
+    led.fill((50, 50, 50))
+    led.write()
 
     sensor = AS5600(i2c)
     sensor.initialize()
@@ -212,9 +277,10 @@ if __name__ == "__main__":
     min_duty = calibrate_min_duty(dc_motor, sensor)
     dc_motor.min_duty = min_duty
 
-    controller = MotorController(dc_motor, sensor, kp=1.0)
+    controller = MotorController(dc_motor, sensor)
 
     try:
+        controller.tune_pid(target_rpm=190, duration=10)
         controller.control_motor_with_rpm(target_rpm=190, duration=10)
     except KeyboardInterrupt:
         dc_motor.stop()

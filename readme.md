@@ -32,7 +32,8 @@
 
 # 3D printing parts - CAD files
 
-UNDER CONSTRUCTION
+AS5600_brick_mount
+dc_motor_brick_mount
 
 # TODO
 finish coding  
