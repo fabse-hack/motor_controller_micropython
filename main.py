@@ -1,8 +1,8 @@
-from machine import I2C, Pin, PWM
+from machine import I2C, Pin, PWM, SPI
 import time
 import sys
 import neopixel
-import itertools
+import _thread
 
 
 # AS5600 Register Konstanten
@@ -15,6 +15,7 @@ STATUS_REGISTER = 0x0B
 AGC_REGISTER = 0x1A
 MAGNITUDE_REGISTER_MSB = 0x1B
 MAGNITUDE_REGISTER_LSB = 0x1C
+
 
 class DCMotor:
     def __init__(self, pin1, pin2, frequency=15000, min_duty=0, max_duty=1023):
@@ -60,14 +61,22 @@ class AS5600:
         self.angle_history = []
         self.time_history = []
         self.max_history = 5  # counting of measurements for Mittelwertbildung
+        self.angle_sum = 0  # Summe der Winkeländerungen
+        self.time_sum = 0  # Summe der Zeitänderungen
 
     def read_register(self, register):
         return self.i2c.readfrom_mem(AS5600_I2C_ADDR, register, 1)[0]
 
     def read_registers(self, reg_msb, reg_lsb):
-        msb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, reg_msb, 1)[0]
-        lsb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, reg_lsb, 1)[0]
-        return (msb << 8) | lsb
+        try:
+            msb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, reg_msb, 1)[0]
+            lsb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, reg_lsb, 1)[0]
+            return (msb << 8) | lsb
+        except OSError as e:
+            print(f"OSError: {e}")
+            dc_motor1.stop()
+            dc_motor2.stop()
+            return 0
 
     def write_register(self, register, value):
         self.i2c.writeto_mem(AS5600_I2C_ADDR, register, bytearray([value]))
@@ -105,7 +114,7 @@ class AS5600:
         current_time = time.ticks_us()
 
         # calculate time differents in Seconds
-        delta_time = time.ticks_diff(current_time, self.last_time) / 1_000_000  # Seconds
+        delta_time = time.ticks_diff(current_time, self.last_time) / 1_000_000
 
         # Berechne Winkeländerung
         delta_angle = current_angle - self.last_angle
@@ -118,38 +127,38 @@ class AS5600:
 
         # Berechne RPM
         if delta_time > 0:
-            angular_velocity = delta_angle / delta_time  # degree each seconds
-            rpm = (angular_velocity / 360) * 60  # RPM
+            angular_velocity = delta_angle / delta_time  # Winkelgeschwindigkeit in Grad pro Sekunde
+            self.rpm = (angular_velocity / 360) * 60  # Umdrehungen pro Minute (RPM)
+
             self.angle_history.append(delta_angle)
             self.time_history.append(delta_time)
-            print(rpm)
+            self.angle_sum += delta_angle
+            self.time_sum += delta_time
 
             if len(self.angle_history) > self.max_history:
-                self.angle_history.pop(0)
-                self.time_history.pop(0)
+                self.angle_sum -= self.angle_history.pop(0)
+                self.time_sum -= self.time_history.pop(0)
 
-            # calculate den gleitenden Durchschnitt
-            avg_delta_angle = sum(self.angle_history) / len(self.angle_history)
-            avg_delta_time = sum(self.time_history) / len(self.time_history)
-            self.rpm = (avg_delta_angle / avg_delta_time) / 360 * 60
+            # Berechne den gleitenden Durchschnitt
+            if self.time_sum > 0:
+                self.rpm = (self.angle_sum / self.time_sum) / 360 * 60
 
         self.last_angle = current_angle
         self.last_time = current_time
 
         print(f"Delta Winkel: {delta_angle:.2f}°, Delta Zeit: {delta_time:.4f}s, RPM: {self.rpm:.2f}")
 
-
     def get_rpm(self):
         return self.rpm
 
 
 class MotorController:
-    def __init__(self, motor, sensor):
+    def __init__(self, motor, sensor1):
         self.motor = motor
-        self.sensor = sensor
-        self.kp = kp
-        self.ki = ki
-        self.kd = kd
+        self.sensor = sensor1
+        self.kp = 1.0
+        self.ki = 0.1
+        self.kd = 0.01
         self.target_rpm = 0
 
         # PID-Parameter
@@ -184,23 +193,18 @@ class MotorController:
         self.previous_error = error
 
     def control_motor_with_rpm(self, target_rpm, duration=10):
-        if self.kd is not None or self.ki is not None or self.kp is not None:
-            self.set_target_rpm(target_rpm)
-            start_time = time.time()
+        self.set_target_rpm(target_rpm)
+        start_time = time.time()
 
-            while time.time() - start_time < duration:
-                self.sensor.update_rpm()
-                self.update()
-                print(f"target-RPM: {self.target_rpm}, actually RPM: {self.sensor.get_rpm()}, PWM-Speed: {self.motor.speed}")
-                sys.stdout.write(f"RPM: {self.sensor.get_rpm()}, PWM-Speed: {self.motor.speed}\n")
-                sys.stdout.flush()
-                time.sleep(0.1)
-            self.motor.stop()
-            print("Motor stopped.")
-        else:
-            print("run tune_pid first!")
+        while time.time() - start_time < duration:
+            self.sensor.update_rpm()
+            self.update()
+            print(f"Ziel-RPM: {self.target_rpm}, Aktuelle RPM: {self.sensor.get_rpm()}, PWM-Geschwindigkeit: {self.motor.speed}")
+            time.sleep(0.1)
+        self.motor.stop()
+        print("Motor gestoppt.")
 
-    def tune_pid(self, target_rpm, duration=10):
+    def tune_pid(self, target_rpm, duration=5):
         kp_values = [0.5, 1.0, 1.5, 2.0]
         ki_values = [0.0, 0.1, 0.2, 0.5]
         kd_values = [0.0, 0.1, 0.2, 0.5]
@@ -218,6 +222,9 @@ class MotorController:
 
             performance = sum((self.target_rpm - self.sensor.get_rpm())**2 for _ in range(duration * 10))
             print(f"Performance: {performance}")
+            dc_motor1.stop()
+            dc_motor2.stop()
+            time.sleep(3)
 
             if performance < best_performance:
                 best_performance = performance
@@ -239,49 +246,70 @@ def product(*args):
 
 def calibrate_min_duty(motor, sensor):
     print("calibration minimal Duty-Cycles...")
-    for duty in range(0, 1024, 10):
+    for duty in range(100, 1024, 20):
         motor.pin1.duty(0)
         motor.pin2.duty(duty)
         time.sleep(0.5)
         sensor.update_rpm()
         rpm = sensor.get_rpm()
         print(f"Duty: {duty}, RPM: {rpm}")
+        dc_motor1.stop()
+        dc_motor2.stop()
+        time.sleep(3)
         if sensor.get_rpm() > 0:
             motor.stop()
-            print(f"Minimal Duty-Cycle found: {duty}")
+            print(f"Minimal Duty-Cycle found: {duty} ###########################")
+            time.sleep(3)
             return duty
     print("calibration error. Set min_duty to 750.")
     return 750
 
 
 if __name__ == "__main__":
+    print("booting")
+    time.sleep(3)
+    print("now starting....")
 
-    sda = Pin(5)
-    scl = Pin(3)
-    i2c = I2C(0, sda=sda, scl=scl, freq=400000)
+    sda1 = Pin(14)
+    scl1 = Pin(13)
+    i2c1 = I2C(0, sda=sda1, scl=scl1, freq=400000)
+
+    sda2 = Pin(10)
+    scl2 = Pin(8)
+    i2c2 = I2C(0, sda=sda2, scl=scl2, freq=400000)
 
     led = neopixel.NeoPixel(Pin(36), 1)
     led.fill((50, 50, 50))
     led.write()
 
-    sensor = AS5600(i2c)
-    sensor.initialize()
+    sensor1 = AS5600(i2c1)
+    sensor1.initialize()
+
+    sensor2 = AS5600(i2c2)
+    sensor2.initialize()
 
     # initalize dc motor
-    frequency = 15000
-    pin1 = 40
-    pin2 = 38
-    dc_motor = DCMotor(pin1, pin2, frequency)
+    frequency1 = 15000
+    pin11 = 38
+    pin21 = 36
+    dc_motor1 = DCMotor(pin11, pin21, frequency1)
+
+    frequency2 = 15000
+    pin12 = 38
+    pin22 = 36
+    dc_motor2 = DCMotor(pin12, pin22, frequency2)
 
     # calibration of minimal Duty-Cycles
-    min_duty = calibrate_min_duty(dc_motor, sensor)
-    dc_motor.min_duty = min_duty
+    min_duty1 = calibrate_min_duty(dc_motor1, sensor1)
+    min_duty2 = calibrate_min_duty(dc_motor2, sensor2)
+    dc_motor1.min_duty = min_duty1
+    dc_motor2.min_duty = min_duty2
 
-    controller = MotorController(dc_motor, sensor)
+    controller = MotorController(dc_motor1, sensor1)
 
     try:
-        controller.tune_pid(target_rpm=190, duration=10)
-        controller.control_motor_with_rpm(target_rpm=190, duration=10)
+        controller.tune_pid(target_rpm=90, duration=10)
+        controller.control_motor_with_rpm(target_rpm=90, duration=10)
     except KeyboardInterrupt:
-        dc_motor.stop()
+        dc_motor1.stop()
         print("Program ending and motor stopped.")
