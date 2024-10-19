@@ -4,6 +4,8 @@ import sys
 import neopixel
 import _thread
 
+CONF_MSB = 0b00000011  # PM = 11 (Low Power Mode 3), HYST = 00, OUTS = 00, PWMF = 00
+CONF_LSB = 0b11000000  # SF = 11 (x8), FTH = 000 (off), WD = 0
 
 # AS5600 Register Konstanten
 AS5600_I2C_ADDR = 0x36
@@ -55,22 +57,20 @@ class DCMotor:
 class AS5600:
     def __init__(self, i2c):
         self.i2c = i2c
-        self.last_angle = self.read_position()
-        self.last_time = time.ticks_us()  # microseconds since start
-        self.rpm = 0
-        self.angle_history = []
-        self.time_history = []
-        self.max_history = 5  # counting of measurements for Mittelwertbildung
-        self.angle_sum = 0  # Summe der Winkeländerungen
-        self.time_sum = 0  # Summe der Zeitänderungen
+        self.last_position = self.read_registers()
+        self.positions = [0, 0, 0]
+        self.last_position = 0
+        self.rounds = 0
+        self.previous_quadrants = [0, 0]
 
-    def read_register(self, register):
-        return self.i2c.readfrom_mem(AS5600_I2C_ADDR, register, 1)[0]
+    def write_register(self, register, value):
+        data = bytearray([register, value])
+        self.i2c.writeto(AS5600_I2C_ADDR, data)
 
-    def read_registers(self, reg_msb, reg_lsb):
+    def read_registers(self):
         try:
-            msb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, reg_msb, 1)[0]
-            lsb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, reg_lsb, 1)[0]
+            msb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, RAW_ANGLE_REGISTER_MSB, 1)[0]
+            lsb = self.i2c.readfrom_mem(AS5600_I2C_ADDR, RAW_ANGLE_REGISTER_LSB, 1)[0]
             return (msb << 8) | lsb
         except OSError as e:
             print(f"OSError: {e}")
@@ -78,78 +78,67 @@ class AS5600:
             dc_motor2.stop()
             return 0
 
-    def write_register(self, register, value):
-        self.i2c.writeto_mem(AS5600_I2C_ADDR, register, bytearray([value]))
-
-    def read_position_raw(self):
-        return self.read_registers(RAW_ANGLE_REGISTER_MSB, RAW_ANGLE_REGISTER_LSB)
-
-    def initialize(self, settings=None):
-        if settings:
-            self.set_power_mode(settings.get('power_mode', 0))
-            self.set_output_stage(settings.get('output_stage', 0))
-        print("Sensor initialize with custom settings")
-
-    def read_position(self):
-        raw_angle = self.read_scaled_angle()
-        degrees = (raw_angle / 4096) * 360
-        return degrees
-
-    def read_scaled_angle(self):
-        return self.read_registers(ANGLE_REGISTER_MSB, ANGLE_REGISTER_LSB)
-
     def get_status(self):
-        status = self.read_register(STATUS_REGISTER)
-        return {
+        status = self.read_registers()
+        status_dict = {
             'magnet_too_strong': bool(status & 0x08),
             'magnet_too_weak': bool(status & 0x10),
             'magnet_detected': bool(status & 0x20)
         }
 
+        print(f"Magnet zu stark: {status_dict['magnet_too_strong']}")
+        print(f"Magnet zu schwach: {status_dict['magnet_too_weak']}")
+        print(f"Magnet erkannt: {status_dict['magnet_detected']}")
+
+        return status_dict
+
     def get_magnitude(self):
-        return self.read_registers(MAGNITUDE_REGISTER_MSB, MAGNITUDE_REGISTER_LSB)
+        magnitude = self.read_registers()
+        print(f"Magnetfeldstärke: {magnitude}")
+        return magnitude
 
-    def update_rpm(self):
-        current_angle = self.read_position()
-        current_time = time.ticks_us()
+    def determine_direction(self):
 
-        # calculate time differents in Seconds
-        delta_time = time.ticks_diff(current_time, self.last_time) / 1_000_000
+        delta1 = self.positions[1] - self.positions[0]
+        delta2 = self.positions[2] - self.positions[1]
 
-        # Berechne Winkeländerung
-        delta_angle = current_angle - self.last_angle
+        if delta1 > 0 and delta2 > 0:
+            return 1  # Rechtslauf (clockwise)
+        elif delta1 < 0 and delta2 < 0:
+            return -1  # Linkslauf (counterclockwise)
+        return 0  # Keine klare Richtung
 
-        # Handle Wrap-around
-        if delta_angle > 180:
-            delta_angle -= 360
-        elif delta_angle < -180:
-            delta_angle += 360
+    def get_quadrant(self):
+        position = self.read_registers()
+        if 0 <= position <= 1365:
+            return 1
+        elif 1365 < position <= 2730:
+            return 2
+        elif 2730 < position <= 4095:
+            return 3
+        else:
+            return -1  # Invalid angle
 
-        # Berechne RPM
-        if delta_time > 0:
-            angular_velocity = delta_angle / delta_time  # Winkelgeschwindigkeit in Grad pro Sekunde
-            self.rpm = (angular_velocity / 360) * 60  # Umdrehungen pro Minute (RPM)
+    def count_rounds(self):
+        current_position = self.read_registers()
 
-            self.angle_history.append(delta_angle)
-            self.time_history.append(delta_time)
-            self.angle_sum += delta_angle
-            self.time_sum += delta_time
+        self.positions.pop(0)
+        self.positions.append(current_position)
 
-            if len(self.angle_history) > self.max_history:
-                self.angle_sum -= self.angle_history.pop(0)
-                self.time_sum -= self.time_history.pop(0)
+        direction = self.determine_direction()
 
-            # Berechne den gleitenden Durchschnitt
-            if self.time_sum > 0:
-                self.rpm = (self.angle_sum / self.time_sum) / 360 * 60
+        current_quadrant = self.get_quadrant()
 
-        self.last_angle = current_angle
-        self.last_time = current_time
+        if current_quadrant == 1 and self.previous_quadrants[0] == 3 and self.previous_quadrants[1] == 2:
+            self.rounds += 1
+        elif current_quadrant == 3 and self.previous_quadrants[0] == 1 and self.previous_quadrants[1] == 2:
+            self.rounds -= 1
 
-        print(f"Delta Winkel: {delta_angle:.2f}°, Delta Zeit: {delta_time:.4f}s, RPM: {self.rpm:.2f}")
+        if current_quadrant != self.previous_quadrants[1]:
+            self.previous_quadrants[0] = self.previous_quadrants[1]
+            self.previous_quadrants[1] = current_quadrant
 
-    def get_rpm(self):
-        return self.rpm
+        print(f"Direction: {direction}, Rounds: {self.rounds}, current_q: {current_quadrant}, previous_q: {self.previous_quadrants[0]}, pre-previous_q: {self.previous_quadrants[1]}")
 
 
 class MotorController:
@@ -266,9 +255,6 @@ def calibrate_min_duty(motor, sensor):
 
 
 if __name__ == "__main__":
-    print("booting")
-    time.sleep(3)
-    print("now starting....")
 
     sda1 = Pin(14)
     scl1 = Pin(13)
@@ -283,10 +269,12 @@ if __name__ == "__main__":
     led.write()
 
     sensor1 = AS5600(i2c1)
-    sensor1.initialize()
+    sensor1.get_status()
+    sensor1.get_magnitude()
+    print("blaaa")
+    sensor1.read_registers()
 
-    sensor2 = AS5600(i2c2)
-    sensor2.initialize()
+    # sensor2 = AS5600(i2c2)
 
     # initalize dc motor
     frequency1 = 15000
@@ -299,17 +287,33 @@ if __name__ == "__main__":
     pin22 = 36
     dc_motor2 = DCMotor(pin12, pin22, frequency2)
 
-    # calibration of minimal Duty-Cycles
-    min_duty1 = calibrate_min_duty(dc_motor1, sensor1)
-    min_duty2 = calibrate_min_duty(dc_motor2, sensor2)
-    dc_motor1.min_duty = min_duty1
-    dc_motor2.min_duty = min_duty2
 
-    controller = MotorController(dc_motor1, sensor1)
+    # sensor1.write_register(0x07, CONF_MSB)  # MSB des CONF Registers schreiben
+    # sensor1.write_register(0x08, CONF_LSB)  # LSB des CONF Registers schreiben
+
+    # Lese die aktuelle Konfiguration zurück, um sicherzustellen, dass sie richtig gesetzt wurde
+    # conf_msb = sensor1.read_registers(0x07)
+    # conf_lsb = sensor1.read_registers(0x08)
+    # print("CONF MSB:", bin(conf_msb))  # Erwartete Ausgabe: '0b11'
+    # print("CONF LSB:", bin(conf_lsb))  # Erwartete Ausgabe: '0b11000000'
 
     try:
-        controller.tune_pid(target_rpm=90, duration=10)
-        controller.control_motor_with_rpm(target_rpm=90, duration=10)
+        while True:
+            sensor1.count_rounds()
     except KeyboardInterrupt:
-        dc_motor1.stop()
-        print("Program ending and motor stopped.")
+        print("Program interrupted by user")
+
+    # calibration of minimal Duty-Cycles
+    # min_duty1 = calibrate_min_duty(dc_motor1, sensor1)
+    # min_duty2 = calibrate_min_duty(dc_motor2, sensor2)
+    # dc_motor1.min_duty = min_duty1
+    # dc_motor2.min_duty = min_duty2
+
+    # controller = MotorController(dc_motor1, sensor1)
+
+    # try:
+    #     controller.tune_pid(target_rpm=90, duration=10)
+    #     controller.control_motor_with_rpm(target_rpm=90, duration=10)
+    # except KeyboardInterrupt:
+    #     dc_motor1.stop()
+    #     print("Program ending and motor stopped.")
