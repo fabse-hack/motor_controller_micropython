@@ -2,10 +2,7 @@ from machine import I2C, Pin, PWM, SPI
 import time
 import sys
 import neopixel
-import _thread
-
-CONF_MSB = 0b00000011  # PM = 11 (Low Power Mode 3), HYST = 00, OUTS = 00, PWMF = 00
-CONF_LSB = 0b11000000  # SF = 11 (x8), FTH = 000 (off), WD = 0
+import math
 
 # AS5600 Register Konstanten
 AS5600_I2C_ADDR = 0x36
@@ -62,6 +59,9 @@ class AS5600:
         self.last_position = 0
         self.rounds = 0
         self.previous_quadrants = [0, 0]
+        self.rounds_per_second = 0
+        self.last_rounds_check_time = time.ticks_ms()
+        self.distance_in_mm = 0
 
     def write_register(self, register, value):
         data = bytearray([register, value])
@@ -91,11 +91,6 @@ class AS5600:
         print(f"Magnet erkannt: {status_dict['magnet_detected']}")
 
         return status_dict
-
-    def get_magnitude(self):
-        magnitude = self.read_registers()
-        print(f"Magnetfeldstärke: {magnitude}")
-        return magnitude
 
     def determine_direction(self):
 
@@ -138,7 +133,21 @@ class AS5600:
             self.previous_quadrants[0] = self.previous_quadrants[1]
             self.previous_quadrants[1] = current_quadrant
 
+        r = 50
+        scope = 2 * math.pi * r
+        self.distance_in_mm = self.rounds * scope
+
         print(f"Direction: {direction}, Rounds: {self.rounds}, current_q: {current_quadrant}, previous_q: {self.previous_quadrants[0]}, pre-previous_q: {self.previous_quadrants[1]}")
+        return self.distance_in_mm, self.rounds, current_quadrant, self.previous_quadrants
+
+    def calculate_rounds_per_second(self):
+        current_time = time.ticks_ms()
+        elapsed_time = time.ticks_diff(current_time, self.last_rounds_check_time) / 1000.0  # Konvertiere zu Sekunden
+        if elapsed_time > 0:
+            self.rounds_per_second = self.rounds / elapsed_time
+        self.last_rounds_check_time = current_time
+        self.rounds = 0
+        return self.rounds_per_second
 
 
 class MotorController:
@@ -270,7 +279,6 @@ if __name__ == "__main__":
 
     sensor1 = AS5600(i2c1)
     sensor1.get_status()
-    sensor1.get_magnitude()
     print("blaaa")
     sensor1.read_registers()
 
@@ -286,16 +294,6 @@ if __name__ == "__main__":
     pin12 = 38
     pin22 = 36
     dc_motor2 = DCMotor(pin12, pin22, frequency2)
-
-
-    # sensor1.write_register(0x07, CONF_MSB)  # MSB des CONF Registers schreiben
-    # sensor1.write_register(0x08, CONF_LSB)  # LSB des CONF Registers schreiben
-
-    # Lese die aktuelle Konfiguration zurück, um sicherzustellen, dass sie richtig gesetzt wurde
-    # conf_msb = sensor1.read_registers(0x07)
-    # conf_lsb = sensor1.read_registers(0x08)
-    # print("CONF MSB:", bin(conf_msb))  # Erwartete Ausgabe: '0b11'
-    # print("CONF LSB:", bin(conf_lsb))  # Erwartete Ausgabe: '0b11000000'
 
     try:
         while True:

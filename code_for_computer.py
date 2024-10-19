@@ -30,11 +30,11 @@ def update_plot(data_queue, rpm_data, duty_data, ax, line1, line2):
                     # Aktualisiere die Daten für die Linien
                     line1.set_ydata(rpm_data)
                     line2.set_ydata(duty_data)
-                    
+
                     # Aktualisiere die X-Achse und Y-Achsen
                     ax.set_xlim(0, len(rpm_data))
                     ax.set_ylim(min(min(rpm_data), min(duty_data)), max(max(rpm_data), max(duty_data)))
-                    
+
                     plt.draw()
                     plt.pause(0.01)
                 except ValueError:
