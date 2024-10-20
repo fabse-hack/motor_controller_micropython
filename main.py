@@ -58,7 +58,12 @@ class AS5600:
         self.positions = [0, 0, 0]
         self.last_position = 0
         self.rounds = 0
-        self.previous_quadrants = [0, 0]
+        self.quadrants_rounds = 0
+        # self.previous_quadrants = [0, 0]
+        self.previous_quadrants = 1
+        self.pre_previous_quadrants = 1
+        self.quadrant = [1, 1, 1]
+        self.last_quadrant_value = None
         self.rounds_per_second = 0
         self.last_rounds_check_time = time.ticks_ms()
         self.distance_in_mm = 0
@@ -98,47 +103,53 @@ class AS5600:
         delta2 = self.positions[2] - self.positions[1]
 
         if delta1 > 0 and delta2 > 0:
-            return 1  # Rechtslauf (clockwise)
+            return 1  # clockwise
         elif delta1 < 0 and delta2 < 0:
-            return -1  # Linkslauf (counterclockwise)
-        return 0  # Keine klare Richtung
+            return -1  # counterclockwis
+        return 0  # no movement
 
     def get_quadrant(self):
         position = self.read_registers()
-        if 0 <= position <= 1365:
+        if 1 <= position <= 1365:
             return 1
         elif 1365 < position <= 2730:
             return 2
         elif 2730 < position <= 4095:
             return 3
-        else:
-            return -1  # Invalid angle
+        # else:
+        #     return -1  # Invalid angle
 
     def count_rounds(self):
-        current_position = self.read_registers()
-
-        self.positions.pop(0)
-        self.positions.append(current_position)
 
         direction = self.determine_direction()
 
-        current_quadrant = self.get_quadrant()
+        new_value = self.get_quadrant()
 
-        if current_quadrant == 1 and self.previous_quadrants[0] == 3 and self.previous_quadrants[1] == 2:
-            self.rounds += 1
-        elif current_quadrant == 3 and self.previous_quadrants[0] == 1 and self.previous_quadrants[1] == 2:
-            self.rounds -= 1
+        if new_value != self.last_quadrant_value:
 
-        if current_quadrant != self.previous_quadrants[1]:
-            self.previous_quadrants[0] = self.previous_quadrants[1]
-            self.previous_quadrants[1] = current_quadrant
+            self.quadrant.append(new_value)
+            self.last_quadrant_value = new_value
+            self.round += 0.3
 
-        r = 50
-        scope = 2 * math.pi * r
+            if len(self.quadrant) > 3:
+                self.quadrant.pop(0)
+
+            print(self.quadrant)
+
+            if self.quadrant[0] > self.quadrant[1] > self.quadrant[2]:
+                self.rounds += 1
+            elif self.quadrant[0] < self.quadrant[1] < self.quadrant[2]:
+                self.rounds -= 1
+
+            print(self.rounds)
+
+        d = 89.5
+        scope = math.pi * d
         self.distance_in_mm = self.rounds * scope
 
-        print(f"Direction: {direction}, Rounds: {self.rounds}, current_q: {current_quadrant}, previous_q: {self.previous_quadrants[0]}, pre-previous_q: {self.previous_quadrants[1]}")
-        return self.distance_in_mm, self.rounds, current_quadrant, self.previous_quadrants
+        # print(f"Direction: {direction}, Rounds: {self.rounds}, current_q: {current_quadrant}, previous_q: {self.previous_quadrants}, pre-previous_q: {self.pre_previous_quadrants}, qudrant_rounds: {self.quadrants_rounds}")
+        # return self.distance_in_mm, self.rounds, current_quadrant, self.previous_quadrants
+        time.sleep(0.5)
 
     def calculate_rounds_per_second(self):
         current_time = time.ticks_ms()
